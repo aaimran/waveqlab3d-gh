@@ -1,5 +1,5 @@
 # Default values
-nprocs=36
+nprocs=40
 fname="test"
 
 
