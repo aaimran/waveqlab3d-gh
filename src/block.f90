@@ -56,9 +56,11 @@ module block
      character(len=256) :: method
      logical :: use_moment_tensor
   integer :: tensor_block_preference
+      logical :: show_moment_tensor_info
+      logical :: show_moment_tesnsor_info
  
  
-  namelist /moment_list/ use_moment_tensor,order,tensor_block_preference
+    namelist /moment_list/ use_moment_tensor,order,tensor_block_preference,show_moment_tensor_info,show_moment_tesnsor_info
  
      ! Set the block ID
      ! The blocks are numbered as 1,2,4,...2^N
@@ -71,12 +73,16 @@ module block
      use_moment_tensor = .FALSE.
      order = 2
   tensor_block_preference = 1
+      show_moment_tensor_info = .FALSE.
+      show_moment_tesnsor_info = .FALSE.
      rewind(infile)
      read(infile,nml=moment_list,iostat=stat)
      if (stat>0) stop 'error reading namelist moment_list' 
      B%MT%use_moment_tensor = use_moment_tensor
      B%MT%order = order
   B%MT%tensor_block_preference = tensor_block_preference
+      if ((.not. show_moment_tensor_info) .and. show_moment_tesnsor_info) show_moment_tensor_info = .TRUE.
+      B%MT%show_moment_tensor_info = show_moment_tensor_info
  
      ! set parameters (really, read these from input file)
      ! set block physics (elastic, acoustic, etc.)

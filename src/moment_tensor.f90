@@ -29,6 +29,33 @@ contains
     skip_line_in_tensor_list = (len_trim(t) == 0) .or. (t(1:1) == '!')
   end function skip_line_in_tensor_list
 
+  subroutine count_sources_between_markers(infile_local, begin_marker, end_marker, n_count, found)
+    integer, intent(in) :: infile_local
+    character(*), intent(in) :: begin_marker, end_marker
+    integer, intent(out) :: n_count
+    logical, intent(out) :: found
+    character(256) :: line
+    integer :: ios
+    n_count = 0
+    found = .false.
+    rewind(infile_local)
+    do
+       read(infile_local,'(a)', iostat=ios) line
+       if (ios /= 0) return
+       if (trim(line) == trim(begin_marker)) then
+          found = .true.
+          exit
+       end if
+    end do
+    do
+       read(infile_local,'(a)', iostat=ios) line
+       if (ios /= 0) exit
+       if (trim(line) == trim(end_marker)) exit
+       if (skip_line_in_tensor_list(line)) cycle
+       n_count = n_count + 1
+    end do
+  end subroutine count_sources_between_markers
+
   logical function want_this_legacy_list(block_id, begin_line, tensor_block_preference)
     ! For legacy inputs, tensor_listU is historically block 1 and tensor_listV block 2.
     ! For ambiguous sources, the higher-level assignment happens after parsing.
@@ -63,13 +90,12 @@ contains
     type(moment_tensor), intent(inout) :: S
     type(block_grid_t), intent(in) :: G
     integer, intent(in) :: infile
-   integer :: n_mom,stat,n,p,AllocateStatus
-    integer :: mq,mr,ms,pq,pr,ps
-    character(256) :: temp
+      integer :: n_mom, stat, n, AllocateStatus
+      integer :: mq, mr, ms, pq, pr, ps
+      character(256) :: temp
 
-   integer :: list_preference
-   logical :: have_union_list
-
+      integer :: list_preference
+      logical :: have_union_list
 
     character(64), dimension(:), allocatable :: source_type
     real(kind = wp), dimension(:), allocatable :: mXX,mXY,mXZ,mYY,mYZ,mZZ
@@ -78,11 +104,12 @@ contains
     real(kind = wp), dimension(:), allocatable :: near_phys_x, near_phys_y, near_phys_z
     real(kind = wp), dimension(:), allocatable :: duration,t_init 
 
-    integer :: ierr,my_id,csize,status,near_temp,tag,dummy
-    integer :: rootX,rootY,rootZ,rootPX,rootPY,rootPZ
+   integer :: ierr, my_id, csize, near_temp, dummy
+   integer :: rootX,rootY,rootZ,rootPX,rootPY,rootPZ
     real(kind = wp) :: physX,physY,physZ,physPX,physPY,physPZ
+   integer :: bbox_local, bbox_global
 
-    list_preference = S%tensor_block_preference
+   list_preference = S%tensor_block_preference
     if (list_preference /= 2) list_preference = 1
 
     ! Determine whether the new unified list exists; if not, fall back to legacy lists.
@@ -138,6 +165,10 @@ contains
           end do
        end if
     end if
+
+    if (allocated(S%in_bbox)) deallocate(S%in_bbox)
+    allocate(S%in_bbox(n_mom))
+    S%in_bbox = .false.
 
 
     ! Set default values for moment tensor
@@ -267,9 +298,13 @@ contains
           physPY = -1_wp
           physPZ = -1_wp
 
+        bbox_local = 0
+
       if (G%X(mq,mr,ms,1) <= S%location_x(n) .AND. S%location_x(n) <= G%X(pq,pr,ps,1) .AND. & 
          G%X(mq,mr,ms,2) <= S%location_y(n) .AND. S%location_y(n) <= G%X(pq,pr,ps,2) .AND. &  
          G%X(mq,mr,ms,3) <= S%location_z(n) .AND. S%location_z(n) <= G%X(pq,pr,ps,3)  ) then  
+
+             bbox_local = 1
 
              rootX = S%near_x(n)
              rootY = S%near_y(n)
@@ -280,6 +315,9 @@ contains
              physZ = G%X(S%near_x(n),S%near_y(n),S%near_z(n),3) 
 
           end if
+
+      call MPI_Allreduce(bbox_local, bbox_global, 1, MPI_INTEGER, MPI_MAX, G%C%comm, ierr)
+      S%in_bbox(n) = (bbox_global == 1)
 
 
           call MPI_Allreduce(rootX,rootPX,1,&

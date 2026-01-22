@@ -76,6 +76,20 @@ contains
     character(64) :: coupling !< locked, slip-weakening_friction, linear_friction
     character(64) :: mesh_source, type_of_mesh, material_source !< cartesian or curvilinear
 
+    ! Moment tensor info summary (optional)
+    integer :: show_info_local, show_info_global
+    integer :: use_mt_local, use_mt_global
+    integer :: pref_local, pref_global
+    logical :: show_moment_tensor_info
+    integer :: total_point_sources, n_u, n_v, n_union
+    logical :: have_union_list
+    integer :: block_rank_local
+    integer :: b1_assigned_local, b2_assigned_local
+    integer :: b1_assigned, b2_assigned
+    integer :: common_points
+    integer, allocatable :: bbox1_local(:), bbox2_local(:), bbox1(:), bbox2(:)
+    character(256) :: line
+
     real(kind = wp) :: dt, dtmin, dt1, dt2, spatialsetep1(3), spatialsetep2(3)
     
     real(kind = wp) :: meshvolume1, meshvolume2, totalvolume, ratio1, ratio2
@@ -120,6 +134,7 @@ contains
     topo = 1.0_wp
     fd_type = 'traditional'
     order = 5
+
     
 
     read(infile,nml=problem_list,iostat=stat)
@@ -289,6 +304,191 @@ contains
 
       
     end do
+
+    ! Determine whether to print the moment tensor summary based on per-block settings.
+    show_info_local = 0
+    use_mt_local = 0
+    pref_local = 1
+
+    if (in_block_comm(1)) then
+      call MPI_Comm_rank(block_comms(1), block_rank_local, ierr)
+      if (block_rank_local == 0) then
+        if (D%B(1)%MT%show_moment_tensor_info) show_info_local = 1
+        if (D%B(1)%MT%use_moment_tensor) use_mt_local = 1
+        pref_local = D%B(1)%MT%tensor_block_preference
+      end if
+    end if
+    if (in_block_comm(2)) then
+      call MPI_Comm_rank(block_comms(2), block_rank_local, ierr)
+      if (block_rank_local == 0) then
+        if (D%B(2)%MT%show_moment_tensor_info) show_info_local = 1
+        if (D%B(2)%MT%use_moment_tensor) use_mt_local = 1
+        pref_local = max(pref_local, D%B(2)%MT%tensor_block_preference)
+      end if
+    end if
+
+    call MPI_Allreduce(show_info_local, show_info_global, 1, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierr)
+    call MPI_Allreduce(use_mt_local, use_mt_global, 1, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierr)
+    call MPI_Allreduce(pref_local, pref_global, 1, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierr)
+    show_moment_tensor_info = (show_info_global == 1)
+
+    ! Print moment tensor source summary once (MPI-safe).
+    if (show_moment_tensor_info .and. (use_mt_global == 1)) then
+      have_union_list = .false.
+      n_union = 0
+      n_u = 0
+      n_v = 0
+
+      if (is_master()) then
+        rewind(infile)
+        do
+          read(infile,'(a)', iostat=stat) line
+          if (stat /= 0) exit
+          if (trim(line) == '!---begin:tensor_list---') then
+            have_union_list = .true.
+            exit
+          end if
+        end do
+
+        if (have_union_list) then
+          rewind(infile)
+          do
+            read(infile,'(a)', iostat=stat) line
+            if (stat /= 0) exit
+            if (trim(line) == '!---begin:tensor_list---') exit
+          end do
+          do
+            read(infile,'(a)', iostat=stat) line
+            if (stat /= 0) exit
+            if (trim(line) == '!---end:tensor_list---') exit
+            line = adjustl(trim(line))
+            if (len_trim(line) == 0) cycle
+            if (line(1:1) == '!') cycle
+            n_union = n_union + 1
+          end do
+          total_point_sources = n_union
+        else
+          rewind(infile)
+          do
+            read(infile,'(a)', iostat=stat) line
+            if (stat /= 0) exit
+            if (trim(line) == '!---begin:tensor_listU---') exit
+          end do
+          do
+            read(infile,'(a)', iostat=stat) line
+            if (stat /= 0) exit
+            if (trim(line) == '!---end:tensor_listU---') exit
+            line = adjustl(trim(line))
+            if (len_trim(line) == 0) cycle
+            if (line(1:1) == '!') cycle
+            n_u = n_u + 1
+          end do
+
+          rewind(infile)
+          do
+            read(infile,'(a)', iostat=stat) line
+            if (stat /= 0) exit
+            if (trim(line) == '!---begin:tensor_listV---') exit
+          end do
+          do
+            read(infile,'(a)', iostat=stat) line
+            if (stat /= 0) exit
+            if (trim(line) == '!---end:tensor_listV---') exit
+            line = adjustl(trim(line))
+            if (len_trim(line) == 0) cycle
+            if (line(1:1) == '!') cycle
+            n_v = n_v + 1
+          end do
+          total_point_sources = n_u + n_v
+        end if
+      end if
+
+      call MPI_BCAST(have_union_list, 1, MPI_LOGICAL, 0, MPI_COMM_WORLD, ierr)
+      call MPI_BCAST(total_point_sources, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, ierr)
+
+      b1_assigned_local = 0
+      b2_assigned_local = 0
+
+      if (in_block_comm(1)) then
+        call MPI_Comm_rank(block_comms(1), block_rank_local, ierr)
+        if (block_rank_local == 0) then
+          if (allocated(D%B(1)%MT%near_x)) then
+            b1_assigned_local = count((D%B(1)%MT%near_x /= -1) .and. (D%B(1)%MT%near_y /= -1) .and. (D%B(1)%MT%near_z /= -1))
+          end if
+        end if
+      end if
+
+      if (in_block_comm(2)) then
+        call MPI_Comm_rank(block_comms(2), block_rank_local, ierr)
+        if (block_rank_local == 0) then
+          if (allocated(D%B(2)%MT%near_x)) then
+            b2_assigned_local = count((D%B(2)%MT%near_x /= -1) .and. (D%B(2)%MT%near_y /= -1) .and. (D%B(2)%MT%near_z /= -1))
+          end if
+        end if
+      end if
+
+      call MPI_Allreduce(b1_assigned_local, b1_assigned, 1, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierr)
+      call MPI_Allreduce(b2_assigned_local, b2_assigned, 1, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierr)
+
+      common_points = 0
+      if (have_union_list .and. total_point_sources > 0) then
+        allocate(bbox1_local(total_point_sources), bbox2_local(total_point_sources))
+        allocate(bbox1(total_point_sources), bbox2(total_point_sources))
+        bbox1_local = 0
+        bbox2_local = 0
+
+        if (in_block_comm(1)) then
+          call MPI_Comm_rank(block_comms(1), block_rank_local, ierr)
+          if (block_rank_local == 0) then
+            if (allocated(D%B(1)%MT%in_bbox)) then
+              bbox1_local = merge(1, 0, D%B(1)%MT%in_bbox)
+            end if
+          end if
+        end if
+
+        if (in_block_comm(2)) then
+          call MPI_Comm_rank(block_comms(2), block_rank_local, ierr)
+          if (block_rank_local == 0) then
+            if (allocated(D%B(2)%MT%in_bbox)) then
+              bbox2_local = merge(1, 0, D%B(2)%MT%in_bbox)
+            end if
+          end if
+        end if
+
+        call MPI_Allreduce(bbox1_local, bbox1, total_point_sources, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierr)
+        call MPI_Allreduce(bbox2_local, bbox2, total_point_sources, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierr)
+        common_points = count((bbox1 == 1) .and. (bbox2 == 1))
+
+        deallocate(bbox1_local, bbox2_local, bbox1, bbox2)
+      end if
+
+      if (is_master()) then
+        write(*,'(a)') '+----------------------------------------------------------------------------+'
+        write(*,'(a)') '| Moment Tensor Info                                                        |'
+        write(*,'(a)') '+----------------------------------------------------------------------------+'
+
+        write(line,'(a,i0)') 'Total point sources: ', total_point_sources
+        write(*,'(a)') '| ' // trim(line) // repeat(' ', max(0, 74 - len_trim(line))) // ' |'
+
+        write(line,'(a,i0)') 'In block 1: ', b1_assigned
+        write(*,'(a)') '| ' // trim(line) // repeat(' ', max(0, 74 - len_trim(line))) // ' |'
+
+        write(line,'(a,i0)') 'In block 2: ', b2_assigned
+        write(*,'(a)') '| ' // trim(line) // repeat(' ', max(0, 74 - len_trim(line))) // ' |'
+
+        write(line,'(a,i0)') 'Common points: ', common_points
+        write(*,'(a)') '| ' // trim(line) // repeat(' ', max(0, 74 - len_trim(line))) // ' |'
+
+        if (pref_global == 2) then
+          line = 'Preference: block 2'
+        else
+          line = 'Preference: block 1'
+        end if
+        write(*,'(a)') '| ' // trim(line) // repeat(' ', max(0, 74 - len_trim(line))) // ' |'
+
+        write(*,'(a)') '+----------------------------------------------------------------------------+'
+      end if
+    end if
 
 
     D%nt = floor(D%t_final/dtmin)

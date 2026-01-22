@@ -88,6 +88,8 @@ module datatypes
  
    type :: moment_tensor
        logical :: use_moment_tensor
+         logical :: show_moment_tensor_info = .false.
+         logical, dimension(:), allocatable :: in_bbox
    ! When a source lies on/near the shared interface plane between blocks,
    ! it may appear inside both blocks' bounding boxes. In that ambiguous case,
    ! we assign it to block 1 by default. Set this to 2 to prefer block 2 instead.
