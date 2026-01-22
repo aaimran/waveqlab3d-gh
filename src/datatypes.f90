@@ -88,6 +88,10 @@ module datatypes
  
    type :: moment_tensor
        logical :: use_moment_tensor
+   ! When a source lies on/near the shared interface plane between blocks,
+   ! it may appear inside both blocks' bounding boxes. In that ambiguous case,
+   ! we assign it to block 1 by default. Set this to 2 to prefer block 2 instead.
+   integer :: tensor_block_preference = 1
        character(64), dimension(:), allocatable :: source_type
        real(kind = wp), dimension(:), allocatable :: mXX,mXY,mXZ,mYY,mYZ,mZZ
        real(kind = wp), dimension(:), allocatable :: location_x,location_y, location_z

@@ -5,6 +5,53 @@ module moment_tensor
 
 contains
 
+  logical function is_begin_tensor_list_line(line)
+    ! Accept both new (tensor_list) and legacy (tensor_listU/tensor_listV) begin markers.
+    character(*), intent(in) :: line
+    is_begin_tensor_list_line = (trim(line) == '!---begin:tensor_list---') .or. &
+         (trim(line) == '!---begin:tensor_listU---') .or. &
+         (trim(line) == '!---begin:tensor_listV---')
+  end function is_begin_tensor_list_line
+
+  logical function is_end_tensor_list_line(line)
+    ! Accept both new (tensor_list) and legacy (tensor_listU/tensor_listV) end markers.
+    character(*), intent(in) :: line
+    is_end_tensor_list_line = (trim(line) == '!---end:tensor_list---') .or. &
+         (trim(line) == '!---end:tensor_listU---') .or. &
+         (trim(line) == '!---end:tensor_listV---')
+  end function is_end_tensor_list_line
+
+  logical function skip_line_in_tensor_list(line)
+    ! Allow blank lines and Fortran-style comment lines in the source list.
+    character(*), intent(in) :: line
+    character(256) :: t
+    t = adjustl(trim(line))
+    skip_line_in_tensor_list = (len_trim(t) == 0) .or. (t(1:1) == '!')
+  end function skip_line_in_tensor_list
+
+  logical function want_this_legacy_list(block_id, begin_line, tensor_block_preference)
+    ! For legacy inputs, tensor_listU is historically block 1 and tensor_listV block 2.
+    ! For ambiguous sources, the higher-level assignment happens after parsing.
+    integer, intent(in) :: block_id
+    character(*), intent(in) :: begin_line
+    integer, intent(in) :: tensor_block_preference
+    character(256) :: t
+    t = trim(begin_line)
+    want_this_legacy_list = .false.
+    if (t == '!---begin:tensor_listU---') then
+       want_this_legacy_list = (block_id == 1)
+    else if (t == '!---begin:tensor_listV---') then
+       want_this_legacy_list = (block_id == 2)
+    else if (t == '!---begin:tensor_list---') then
+       ! New unified list: both blocks read it; assignment is filtered by location.
+       want_this_legacy_list = .true.
+    end if
+    ! tensor_block_preference isn't used here, but kept in signature for clarity/extensibility.
+    dummy_use_tensor_block_preference: if (tensor_block_preference < 0) then
+       want_this_legacy_list = want_this_legacy_list
+    end if dummy_use_tensor_block_preference
+  end function want_this_legacy_list
+
   subroutine init_moment_tensor(G,S,infile)
 
     use datatypes, only : moment_tensor,block_grid_t
@@ -16,9 +63,12 @@ contains
     type(moment_tensor), intent(inout) :: S
     type(block_grid_t), intent(in) :: G
     integer, intent(in) :: infile
-    integer :: n_mom,stat,n,p,AllocateStatus
+   integer :: n_mom,stat,n,p,AllocateStatus
     integer :: mq,mr,ms,pq,pr,ps
     character(256) :: temp
+
+   integer :: list_preference
+   logical :: have_union_list
 
 
     character(64), dimension(:), allocatable :: source_type
@@ -32,39 +82,61 @@ contains
     integer :: rootX,rootY,rootZ,rootPX,rootPY,rootPZ
     real(kind = wp) :: physX,physY,physZ,physPX,physPY,physPZ
 
+    list_preference = S%tensor_block_preference
+    if (list_preference /= 2) list_preference = 1
 
-    if (S%block_id == 1) then
-       rewind(infile)
+    ! Determine whether the new unified list exists; if not, fall back to legacy lists.
+    have_union_list = .false.
+    rewind(infile)
+    do
+       read(infile,'(a)', iostat=stat) temp
+       if (stat /= 0) exit
+       if (trim(temp) == '!---begin:tensor_list---') then
+          have_union_list = .true.
+          exit
+       end if
+    end do
+
+    rewind(infile)
+    n_mom = 0
+
+    if (have_union_list) then
+       ! New unified list: count (non-empty, non-comment) lines between begin/end.
        do
           read(infile,'(a)') temp
-          if (temp=='!---begin:tensor_listU---') exit
+          if (trim(temp) == '!---begin:tensor_list---') exit
        end do
-
-       ! determine number of moment tensors in list
-
-       n_mom = 0
        do
           read(infile,'(a)') temp
-          if (temp=='!---end:tensor_listU---') exit
-          n_mom = n_mom+1
+          if (trim(temp) == '!---end:tensor_list---') exit
+          if (skip_line_in_tensor_list(temp)) cycle
+          n_mom = n_mom + 1
        end do
-    end if
-
-    if (S%block_id == 2) then
-       rewind(infile)
-       do
-          read(infile,'(a)') temp
-          if (temp=='!---begin:tensor_listV---') exit
-       end do
-
-       ! determine number of moment tensors in list
-
-       n_mom = 0
-       do
-          read(infile,'(a)') temp
-          if (temp=='!---end:tensor_listV---') exit
-          n_mom = n_mom+1
-       end do
+    else
+       ! Legacy: U list belongs to block 1, V list belongs to block 2.
+       if (S%block_id == 1) then
+          do
+             read(infile,'(a)') temp
+             if (trim(temp) == '!---begin:tensor_listU---') exit
+          end do
+          do
+             read(infile,'(a)') temp
+             if (trim(temp) == '!---end:tensor_listU---') exit
+             if (skip_line_in_tensor_list(temp)) cycle
+             n_mom = n_mom + 1
+          end do
+       else if (S%block_id == 2) then
+          do
+             read(infile,'(a)') temp
+             if (trim(temp) == '!---begin:tensor_listV---') exit
+          end do
+          do
+             read(infile,'(a)') temp
+             if (trim(temp) == '!---end:tensor_listV---') exit
+             if (skip_line_in_tensor_list(temp)) cycle
+             n_mom = n_mom + 1
+          end do
+       end if
     end if
 
 
@@ -110,28 +182,50 @@ contains
 
     rewind(infile)
 
-    if(S%block_id == 1) then
-       do
-          read(infile,'(a)') temp
-          if (temp=='!---begin:tensor_listU---') exit
-       end do
-    end if
-
-    if(S%block_id == 2) then
-       do
-          read(infile,'(a)') temp
-          if (temp=='!---begin:tensor_listV---') exit
-       end do
-    end if
-
     if (S%num_tensor > 0) then
-       do n = 1,S%num_tensor
-          read(infile,*) S%source_type(n),S%duration(n),S%t_init(n),      &
-               S%mXX(n),S%mYY(n),S%mZZ(n),                      &
-               S%mXY(n),S%mXZ(n),S%mYZ(n),                      &
-               S%location_x(n),S%location_y(n),S%location_z(n), &
-               S%alpha(n)
-       end do
+       if (have_union_list) then
+          do
+             read(infile,'(a)') temp
+             if (trim(temp) == '!---begin:tensor_list---') exit
+          end do
+          do n = 1,S%num_tensor
+             do
+                read(infile,'(a)') temp
+                if (skip_line_in_tensor_list(temp)) cycle
+                exit
+             end do
+             read(temp,*) S%source_type(n),S%duration(n),S%t_init(n),      &
+                  S%mXX(n),S%mYY(n),S%mZZ(n),                      &
+                  S%mXY(n),S%mXZ(n),S%mYZ(n),                      &
+                  S%location_x(n),S%location_y(n),S%location_z(n), &
+                  S%alpha(n)
+          end do
+       else
+          if(S%block_id == 1) then
+             do
+                read(infile,'(a)') temp
+                if (trim(temp) == '!---begin:tensor_listU---') exit
+             end do
+          else if(S%block_id == 2) then
+             do
+                read(infile,'(a)') temp
+                if (trim(temp) == '!---begin:tensor_listV---') exit
+             end do
+          end if
+
+          do n = 1,S%num_tensor
+             do
+                read(infile,'(a)') temp
+                if (skip_line_in_tensor_list(temp)) cycle
+                exit
+             end do
+             read(temp,*) S%source_type(n),S%duration(n),S%t_init(n),      &
+                  S%mXX(n),S%mYY(n),S%mZZ(n),                      &
+                  S%mXY(n),S%mXZ(n),S%mYZ(n),                      &
+                  S%location_x(n),S%location_y(n),S%location_z(n), &
+                  S%alpha(n)
+          end do
+       end if
     end if
 
     mq = G%C%mq 
@@ -151,7 +245,7 @@ contains
     ! print*,'init: ',mq,mr,ms,pq,pr,ps
 
 
-    if (S%num_tensor > 0) then
+   if (S%num_tensor > 0) then
 
        call Find_Coordinates_moment(G%X,S%location_x,S%location_y,S%location_z,  &             
             S%near_x,S%near_y,S%near_z,S%num_tensor,G%C%nq,G%C%nr,G%C%ns,mq,mr,ms,pq,pr,ps)          
@@ -159,7 +253,7 @@ contains
        call MPI_COMM_SIZE(MPI_COMM_WORLD,csize,ierr)
        call MPI_Comm_rank(MPI_COMM_WORLD,my_id,ierr) 
 
-       do n = 1,S%num_tensor
+   do n = 1,S%num_tensor
           rootX  = -1
           rootY  = -1  
           rootZ  = -1  
@@ -173,9 +267,9 @@ contains
           physPY = -1_wp
           physPZ = -1_wp
 
-          if (G%X(mq,mr,ms,1) <= S%location_x(n) .AND. S%location_x(n) <= G%X(pq,pr,ps,1) .AND. & 
-               G%X(mq,mr,ms,2) <= S%location_y(n) .AND. S%location_y(n) <= G%X(pq,pr,ps,2) .AND. &  
-               G%X(mq,mr,ms,3) <= S%location_z(n) .AND. S%location_z(n) <= G%X(pq,pr,ps,3)  ) then  
+      if (G%X(mq,mr,ms,1) <= S%location_x(n) .AND. S%location_x(n) <= G%X(pq,pr,ps,1) .AND. & 
+         G%X(mq,mr,ms,2) <= S%location_y(n) .AND. S%location_y(n) <= G%X(pq,pr,ps,2) .AND. &  
+         G%X(mq,mr,ms,3) <= S%location_z(n) .AND. S%location_z(n) <= G%X(pq,pr,ps,3)  ) then  
 
              rootX = S%near_x(n)
              rootY = S%near_y(n)
@@ -201,6 +295,23 @@ contains
                MPI_DOUBLE,MPI_MAX,G%C%comm,ierr)
           call MPI_Allreduce(physZ,physPZ,1,&
                MPI_DOUBLE,MPI_MAX,G%C%comm,ierr)
+
+          ! If the unified list is used, a source may lie on the shared plane and
+          ! appear inside both blocks' bounding boxes. Resolve ties deterministically:
+          ! - default -> keep it in block 1
+          ! - override -> block 2 when tensor_block_preference==2
+          if (have_union_list) then
+             if (S%block_id /= list_preference) then
+                if (rootPX /= -1 .or. rootPY /= -1 .or. rootPZ /= -1) then
+                   rootPX = -1
+                   rootPY = -1
+                   rootPZ = -1
+                   physPX = -1_wp
+                   physPY = -1_wp
+                   physPZ = -1_wp
+                end if
+             end if
+          end if
 
           S%near_x(n) = rootPX
           S%near_y(n) = rootPY

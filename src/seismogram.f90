@@ -2,7 +2,7 @@ module seismogram
 
   use common, only : wp
   use datatypes, only : block_grid_t, seismogram_type
-   use mpi3dbasic, only : is_master, boxed_lines, rank, nprocs
+   use mpi3dbasic, only : is_master, boxed_lines, rank, nprocs, stdout
    use mpi
   implicit none
 
@@ -220,7 +220,7 @@ contains
           station_info_lines(6) = 'debug_station_info: ' // merge('T','F',debug_station_info)
           station_info_lines(7) = 'save_debug_station: ' // merge('T','F',save_debug_station)
           write(station_info_lines(8),'(a,i0)') 'nstations (this block): ', S%nstations
-          call boxed_lines(8, station_info_lines(1:8), 78)
+          call boxed_lines(stdout, station_info_lines(1:8), 78)
        end if
 
        ! allocate station indices array and output file unit array
