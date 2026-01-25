@@ -162,6 +162,17 @@ contains
     call decompose1d(C%nq,C%size_q,C%coord(1),C%mq,C%pq,C%lnq)
     call decompose1d(C%nr,C%size_r,C%coord(2),C%mr,C%pr,C%lnr)
     call decompose1d(C%ns,C%size_s,C%coord(3),C%ms,C%ps,C%lns)
+
+    ! Safety: high-order schemes use a stencil half-width of nb points.
+    ! Very thin subdomains (where ln <= 2*nb) become "all boundary" and are
+    ! a common source of instabilities once a strong source excites the field.
+    ! Also, halo exchange requires at least nb interior points.
+    if (C%lnq < C%nb .or. C%lnr < C%nb .or. C%lns < C%nb .or. &
+        C%lnq <= 2*C%nb .or. C%lnr <= 2*C%nb .or. C%lns <= 2*C%nb) then
+       if (is_master(comm)) then
+          call error('Error: MPI subdomain too small for stencil width nb. Reduce np or use a different process grid/decomposition.', 'decompose3d')
+       end if
+    end if
     C%mbq = C%mq-C%nb
     C%pbq = C%pq+C%nb
     C%mbr = C%mr-C%nb
